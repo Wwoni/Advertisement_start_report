@@ -1,6 +1,5 @@
 import os
 import time
-import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 from PIL import Image
@@ -12,161 +11,171 @@ SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
 def get_banner_id(href):
-    """
-    링크에서 ID 숫자 또는 식별자를 추출합니다.
-    """
-    if not href:
-        return "unknown"
-    # URL 파라미터 제거 (? 이후)
+    """링크에서 ID 추출"""
+    if not href: return "unknown"
     clean_path = href.split('?')[0]
-    # 슬래시(/)로 나눈 뒤 가장 마지막 부분 추출
     segments = clean_path.split('/')
-    # 혹시 마지막이 비어있다면(슬래시로 끝난 경우) 그 앞의 것 사용
-    last_segment = segments[-1] if segments[-1] else segments[-2]
-    return last_segment
+    return segments[-1] if segments[-1] else segments[-2]
 
-def create_combined_pdf(web_img_path, app_img_path, output_pdf_path):
+def create_side_by_side_pdf(web_img_path, app_img_path, output_pdf_path):
     """
-    웹(상단) + 앱(하단) 이미지를 이어붙여 PDF로 저장합니다.
+    웹(왼쪽) + 앱(오른쪽) 나란히 배치하여 PDF 생성
     """
     try:
         image1 = Image.open(web_img_path).convert('RGB')
         image2 = Image.open(app_img_path).convert('RGB')
 
-        # 두 이미지 중 더 넓은 폭에 맞춤
-        max_width = max(image1.width, image2.width)
-        total_height = image1.height + image2.height
+        # 높이는 둘 중 큰 것에 맞춤
+        max_height = max(image1.height, image2.height)
+        # 폭은 두 이미지 폭의 합
+        total_width = image1.width + image2.width
         
         # 흰색 배경 캔버스 생성
-        new_image = Image.new('RGB', (max_width, total_height), (255, 255, 255))
+        new_image = Image.new('RGB', (total_width, max_height), (255, 255, 255))
         
-        # 중앙 정렬하여 붙여넣기
-        new_image.paste(image1, ((max_width - image1.width) // 2, 0))
-        new_image.paste(image2, ((max_width - image2.width) // 2, image1.height))
+        # 붙여넣기 (좌측: Web, 우측: App)
+        new_image.paste(image1, (0, 0))
+        new_image.paste(image2, (image1.width, (max_height - image2.height) // 2)) # 앱 이미지는 세로 중앙 정렬
         
         new_image.save(output_pdf_path)
         print(f"📄 PDF 병합 완료: {output_pdf_path}")
     except Exception as e:
-        print(f"❌ PDF 생성 중 오류: {e}")
+        print(f"❌ PDF 생성 실패: {e}")
 
 def main():
-    # 슬랙 클라이언트 초기화
     client = WebClient(token=SLACK_TOKEN)
 
     with sync_playwright() as p:
-        # 브라우저 실행 (headless=True는 화면 없이 실행)
-        print("🚀 브라우저를 실행합니다...")
+        print("🚀 브라우저 실행 중...")
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         page = context.new_page()
 
-        # 1. 사이트 접속
-        print(f"🌐 {TARGET_URL} 접속 중...")
+        # ---------------------------------------------------------
+        # [Step 0] 데이터 수집 (배너 리스트 파악)
+        # ---------------------------------------------------------
+        print(f"🌐 접속 중: {TARGET_URL}")
         page.goto(TARGET_URL)
-
-        # 2. 로딩 대기 (가장 중요한 수정 부분)
-        # '지금 주목할 소식' 배너 리스트(li)가 뜰 때까지 최대 15초 기다립니다.
-        # 부분 일치 선택자(*=)를 사용하여 클래스명이 조금 바뀌어도 찾을 수 있게 함
+        
+        # 배너 로딩 대기
         try:
-            print("⏳ 배너 로딩을 기다리는 중...")
             page.wait_for_selector("li[class*='BannerArea_MainBannerArea__slider__slide']", state="visible", timeout=15000)
-            time.sleep(2) # 애니메이션 안정화를 위해 2초 추가 대기
-        except Exception:
-            print("❌ 배너 요소를 찾을 수 없습니다. (Timeout)")
+            time.sleep(2)
+        except:
+            print("❌ 배너 로딩 실패")
             browser.close()
             return
 
-        # 3. 배너 개수 파악
+        # 배너 요소들 찾기
         slides = page.locator("li[class*='BannerArea_MainBannerArea__slider__slide']")
         count = slides.count()
-        print(f"📊 총 {count}개의 배너를 발견했습니다.")
-
-        if count == 0:
-            print("❌ 배너 개수가 0개입니다. 선택자를 확인해주세요.")
-            browser.close()
-            return
-
-        # 4. 반복 캡쳐 및 보고
+        print(f"📊 총 {count}개의 배너 식별됨.")
+        
+        # 배너들의 ID(href)를 미리 저장해둠 (순서 보장용)
+        banner_data = []
         for i in range(count):
-            print(f"\n--- [{i+1}/{count}] 번째 배너 작업 시작 ---")
-            
-            # (1) 현재 순서(i번째) 배너의 링크(ID) 추출
-            # 주의: 화면에 보이는 것이 아니라 DOM 순서대로 가져옴 (대부분 일치)
             try:
-                # i번째 슬라이드 내부의 a 태그 href 가져오기
+                # i번째 슬라이드 내부 a 태그
                 href = slides.nth(i).locator("a").get_attribute("href")
                 banner_id = get_banner_id(href)
-            except Exception as e:
-                print(f"⚠️ ID 추출 실패 ({e}), 'unknown'으로 설정")
-                banner_id = "unknown"
+                banner_data.append({"index": i, "id": banner_id, "href": href})
+            except:
+                banner_data.append({"index": i, "id": f"unknown_{i}", "href": ""})
 
-            today = datetime.now().strftime("%y%m%d")
-            filename = f"{today}_{banner_id}_게재보고"
+        # ---------------------------------------------------------
+        # [Step 1] WEB 캡쳐 (순차적으로 '다음' 누르며 촬영)
+        # ---------------------------------------------------------
+        print("\n📸 [Phase 1] WEB 캡쳐 시작 (PC View)")
+        # 높이를 1200으로 늘려 잘림 방지
+        page.set_viewport_size({"width": 1920, "height": 1200})
+        time.sleep(1)
+
+        for i, item in enumerate(banner_data):
+            # i가 0보다 크면 '다음' 버튼 눌러서 배너 넘기기
+            if i > 0:
+                try:
+                    next_btn = page.locator('button[aria-label="다음"]').first
+                    next_btn.click()
+                    time.sleep(1.5) # 애니메이션 대기 (필수)
+                except Exception as e:
+                    print(f"⚠️ 다음 버튼 클릭 실패: {e}")
+
+            # 캡쳐 (Web은 현재 뷰포트 그대로)
+            file_web = f"web_{i}.png"
+            page.screenshot(path=file_web)
+            print(f"  - Web [{i+1}/{count}] {item['id']} 캡쳐됨")
+
+        # ---------------------------------------------------------
+        # [Step 2] APP 캡쳐 (요소 찾아가서 촬영)
+        # ---------------------------------------------------------
+        print("\n📸 [Phase 2] APP 캡쳐 시작 (Mobile View)")
+        page.set_viewport_size({"width": 393, "height": 852}) # iPhone 14 Pro
+        page.reload() # 페이지 새로고침 (Web에서 돌려놓은 슬라이드 초기화)
+        
+        # 모바일 로딩 대기
+        try:
+            page.wait_for_selector("li[class*='BannerArea_MainBannerArea__slider__slide']", state="visible", timeout=15000)
+            time.sleep(2)
+        except:
+            pass # 이미 로딩되어 있을 수 있음
+
+        for i, item in enumerate(banner_data):
+            file_app = f"app_{i}.png"
+            
+            # 모바일에서는 '다음' 버튼 대신, 해당 요소로 스크롤 이동
+            try:
+                # 저장해둔 href를 가진 요소를 다시 찾음
+                target_slide = page.locator(f"li[class*='BannerArea_MainBannerArea__slider__slide'] a[href='{item['href']}']").first
+                
+                # 해당 요소가 화면 중앙에 오도록 스크롤
+                target_slide.scroll_into_view_if_needed()
+                time.sleep(0.5) # 스크롤 안정화
+                
+                page.screenshot(path=file_app)
+                print(f"  - App [{i+1}/{count}] {item['id']} 캡쳐됨")
+            except Exception as e:
+                print(f"❌ App 캡쳐 실패 ({item['id']}): {e}")
+                # 실패 시 빈 이미지라도 생성 방지 등을 위해 pass
+
+        # ---------------------------------------------------------
+        # [Step 3] 병합 및 전송
+        # ---------------------------------------------------------
+        print("\n📤 [Phase 3] 병합 및 슬랙 전송")
+        
+        for i, item in enumerate(banner_data):
             web_png = f"web_{i}.png"
             app_png = f"app_{i}.png"
-            pdf_path = f"{filename}.pdf"
-
-            # (2) WEB 캡쳐 (PC 해상도)
-            try:
-                page.set_viewport_size({"width": 1920, "height": 1080})
-                time.sleep(0.5) # 리사이징 대기
-                page.screenshot(path=web_png)
-                print("📸 Web 캡쳐 완료")
-            except Exception as e:
-                print(f"❌ Web 캡쳐 실패: {e}")
-
-            # (3) APP 캡쳐 (모바일 해상도)
-            try:
-                page.set_viewport_size({"width": 393, "height": 852})
-                time.sleep(0.5) # 리사이징 대기
-                page.screenshot(path=app_png)
-                print("📸 App 캡쳐 완료")
-            except Exception as e:
-                print(f"❌ App 캡쳐 실패: {e}")
-
-            # (4) PDF 생성
-            create_combined_pdf(web_png, app_png, pdf_path)
-
-            # (5) 슬랙 전송
-            if SLACK_TOKEN and SLACK_CHANNEL:
-                try:
-                    client.files_upload_v2(
-                        channel=SLACK_CHANNEL,
-                        file=pdf_path,
-                        title=pdf_path,
-                        initial_comment=f"📢 [{i+1}/{count}] 배너 게재 보고 : {banner_id}"
-                    )
-                    print(f"✅ 슬랙 전송 완료: {filename}")
-                except Exception as e:
-                    print(f"❌ 슬랙 전송 에러: {e}")
-            else:
-                print("⚠️ 슬랙 토큰이 설정되지 않아 전송을 건너뜁니다.")
-
-            # (6) 다음 배너로 이동 ('다음' 버튼 클릭)
-            # 버튼 클릭을 위해 다시 PC 뷰포트로 복귀 (버튼이 모바일에서 가려질 수 있음)
-            page.set_viewport_size({"width": 1920, "height": 1080})
-            time.sleep(0.5)
             
-            try:
-                # '다음' 버튼 찾기 (여러 개일 경우 첫 번째 것)
-                next_button = page.locator('button[aria-label="다음"]').first
-                if next_button.is_visible():
-                    next_button.click()
-                    print("➡️ '다음' 버튼 클릭함")
-                    time.sleep(1.5) # 슬라이드 넘어가는 시간 대기
-                else:
-                    print("⚠️ '다음' 버튼을 찾을 수 없습니다. (마지막 배너일 수 있음)")
-            except Exception as e:
-                print(f"⚠️ 다음 버튼 클릭 중 오류: {e}")
+            today = datetime.now().strftime("%y%m%d")
+            pdf_filename = f"{today}_{item['id']}_게재보고.pdf"
 
-            # (7) 임시 파일 삭제 (청소)
-            if os.path.exists(web_png): os.remove(web_png)
-            if os.path.exists(app_png): os.remove(app_png)
-            if os.path.exists(pdf_path): os.remove(pdf_path)
+            if os.path.exists(web_png) and os.path.exists(app_png):
+                # 좌우 병합 PDF 생성
+                create_side_by_side_pdf(web_png, app_png, pdf_filename)
+                
+                # 슬랙 전송
+                if SLACK_TOKEN and SLACK_CHANNEL:
+                    try:
+                        client.files_upload_v2(
+                            channel=SLACK_CHANNEL,
+                            file=pdf_filename,
+                            title=pdf_filename,
+                            initial_comment=f"📢 [{i+1}/{count}] {item['id']} 배너 보고"
+                        )
+                        print(f"  ✅ 전송 완료: {item['id']}")
+                    except Exception as e:
+                        print(f"  ❌ 전송 실패: {e}")
+                
+                # 파일 정리
+                os.remove(web_png)
+                os.remove(app_png)
+                if os.path.exists(pdf_filename): os.remove(pdf_filename)
+            else:
+                print(f"⚠️ 이미지 파일 누락으로 건너뜀: {item['id']}")
 
-        print("\n✅ 모든 작업이 완료되었습니다.")
+        print("\n✅ 모든 작업 완료!")
         browser.close()
 
 if __name__ == "__main__":
