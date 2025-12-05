@@ -11,12 +11,12 @@ SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
-# --- [중요] 캡쳐 설정 ---
-# Web: 너비는 1100 고정, 높이는 배너 끝부분에 맞춰 자동 조절 (잘림 방지)
+# --- 캡쳐 설정 ---
+# Web: 너비 1100 고정. 높이는 2500으로 넉넉하게 렌더링 후, 실제 콘텐츠만큼만 오려냅니다.
 WEB_WIDTH = 1100 
-WEB_VIEWPORT_H = 1500 # 렌더링용 넉넉한 높이
+WEB_RENDER_HEIGHT = 2500 
 
-# App: 아이폰 14 Pro 비율 등
+# App: 모바일 뷰포트
 APP_WIDTH, APP_HEIGHT = 353, 765
 
 LAYOUT_GAP = 40 # PDF 병합 시 좌우 간격
@@ -34,7 +34,7 @@ def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
         image1 = Image.open(web_img_path).convert('RGB')
         image2 = Image.open(app_img_path).convert('RGB')
 
-        # 높이는 둘 중 큰 것에 맞춤 (보통 웹이 더 큼)
+        # 높이는 둘 중 큰 것에 맞춤 (웹 이미지가 길어질 것이므로 웹 기준이 될 가능성 높음)
         max_height = max(image1.height, image2.height)
         total_width = image1.width + image2.width + LAYOUT_GAP
         
@@ -43,6 +43,7 @@ def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
         
         # 웹(왼쪽), 앱(오른쪽) 배치
         new_image.paste(image1, (0, 0))
+        # 앱 이미지는 상단 정렬 (또는 중앙 정렬 원하시면 수정 가능)
         new_image.paste(image2, (image1.width + LAYOUT_GAP, 0))
         
         # PDF 저장 (해상도 유지)
@@ -56,7 +57,6 @@ def handle_popup(page):
     try:
         page.keyboard.press("Escape")
         time.sleep(0.5)
-        # Braze 등 마케팅 팝업 닫기
         if page.locator("div[class*='Modal']").is_visible() or page.locator("#carousel").is_visible():
             close_btn = page.locator("button[class*='close'], button[aria-label*='Close'], button[aria-label*='닫기']").first
             if close_btn.is_visible():
@@ -74,10 +74,10 @@ def main():
         print("🚀 브라우저 실행 중 (고화질)...")
         browser = p.chromium.launch(headless=True)
         
-        # [Web 컨텍스트] 고화질(2배율), 너비 1100 고정
+        # [Web 컨텍스트] 고화질(2배율), 너비 1100, 높이 2500(충분히 길게)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": WEB_WIDTH, "height": WEB_VIEWPORT_H},
+            viewport={"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT},
             device_scale_factor=2
         )
         page = context.new_page()
@@ -90,7 +90,6 @@ def main():
         time.sleep(3)
         handle_popup(page)
 
-        # 배너 섹션 로딩 대기
         try:
             page.wait_for_selector("li[class*='BannerArea_MainBannerArea__slider__slide']", state="visible", timeout=15000)
         except:
@@ -98,7 +97,6 @@ def main():
             browser.close()
             return
 
-        # 전체 배너 개수 확인
         slides = page.locator("li[class*='BannerArea_MainBannerArea__slider__slide']")
         count = slides.count()
         print(f"📊 총 배너 수: {count}")
@@ -147,6 +145,7 @@ def main():
             # (B) 전략 2: 페이지네이션 (Lazy용) - 새로고침으로 못 찾은 경우
             if not found:
                 print(f"   ⚠️ 페이지네이션 탐색 시작 (Lazy 배너)")
+                # 해당 배너의 a태그를 포함한 li 요소 찾기
                 target_locator = page.locator(f"li[class*='BannerArea_MainBannerArea__slider__slide'] a[href='{target['href']}']")
                 next_btn = page.locator('button[aria-label="다음"]').first
                 
@@ -171,29 +170,31 @@ def main():
                 app_png = f"app_{idx}.png"
                 pdf_filename = f"{datetime.now().strftime('%y%m%d')}_{target['id']}_게재보고.pdf"
 
-                # (1) WEB 캡쳐 (자동 높이 조절)
+                # (1) WEB 캡쳐 (하단 잘림 방지 로직 적용)
                 try:
-                    page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_VIEWPORT_H})
+                    # 뷰포트를 길게 설정하여 내용이 다 나오게 함
+                    page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT})
                     time.sleep(0.5)
                     handle_popup(page)
                     
-                    # 배너 섹션의 바닥 좌표(Y) 계산 -> 정확한 Crop 높이 구하기 [핵심]
+                    # [핵심] 자바스크립트로 배너 영역의 '바닥(Bottom)' 좌표를 계산
                     clip_height = page.evaluate("""() => {
-                        // '지금 주목할 소식'이 포함된 섹션 전체를 찾거나, 슬라이더 컨테이너를 찾음
-                        const slider = document.querySelector("div[class*='BannerArea_MainBannerArea__slider']");
-                        if (slider) {
-                            const rect = slider.getBoundingClientRect();
-                            // 상단부터 슬라이더 바닥까지 + 여유분 20px
-                            return rect.bottom + window.scrollY + 20; 
+                        // '지금 주목할 소식' 배너 리스트(ul)를 찾음
+                        const bannerList = document.querySelector("ul[class*='BannerArea_MainBannerArea__slider']");
+                        
+                        if (bannerList) {
+                            const rect = bannerList.getBoundingClientRect();
+                            // 요소의 바닥 좌표 + 스크롤 위치 + 여유분(50px)
+                            return rect.bottom + window.scrollY + 50;
                         }
-                        return 800; // 기본값
+                        // 요소를 못 찾았을 경우 안전하게 900px 반환
+                        return 900; 
                     }""")
                     
-                    # 만약 계산된 높이가 너무 작으면 최소 728 보장
-                    final_height = max(clip_height, 728)
+                    print(f"     📸 Web 캡쳐 (1100 x {int(clip_height)}) - 자동 높이 조절됨")
                     
-                    print(f"     📸 Web 캡쳐 (1100 x {int(final_height)})")
-                    page.screenshot(path=web_png, clip={"x": 0, "y": 0, "width": WEB_WIDTH, "height": final_height})
+                    # 계산된 높이만큼만 정확하게 잘라서 캡쳐 (clip)
+                    page.screenshot(path=web_png, clip={"x": 0, "y": 0, "width": WEB_WIDTH, "height": clip_height})
                     
                 except Exception as e:
                     print(f"     ❌ Web 캡쳐 에러: {e}")
@@ -229,8 +230,8 @@ def main():
                     for f in [web_png, app_png, pdf_filename]:
                         if os.path.exists(f): os.remove(f)
                 
-                # 다음 타겟을 위해 Web 사이즈 복구
-                page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_VIEWPORT_H})
+                # 다음 타겟을 위해 Web 사이즈 복구 (탐색 모드)
+                page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT})
             else:
                 print(f"   ❌ 결국 {target['id']}를 찾지 못했습니다. (건너뜀)")
 
