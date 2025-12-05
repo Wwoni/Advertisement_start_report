@@ -10,16 +10,18 @@ SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
-# --- 캡쳐 설정 ---
-# [Web] 3개 노출을 위해 뷰포트는 1280으로 설정, 결과물은 1100으로 리사이징
-WEB_VIEWPORT_W = 1280 
-WEB_TARGET_WIDTH = 1100
-WEB_VIEWPORT_H = 2000 # 렌더링용 넉넉한 높이
+# --- [중요] 캡쳐 및 PDF 설정 ---
+# Web: 3개 노출 보장을 위해 1480px로 넉넉하게 열고, 결과물은 1100px로 맞춤
+WEB_VIEWPORT_W = 1480 
+WEB_TARGET_WIDTH = 1100 # PDF에 들어갈 최종 너비
+WEB_RENDER_HEIGHT = 2000
 
-# [App] 모바일 뷰포트
-APP_WIDTH, APP_HEIGHT = 353, 765
+# App: 캡쳐는 353px 뷰포트로 하고, PDF에 넣을 때도 이 사이즈를 유지
+APP_WIDTH = 353
+APP_HEIGHT = 765
+APP_TARGET_WIDTH = 353 # PDF에 들어갈 최종 너비
 
-LAYOUT_GAP = 40 # PDF 병합 시 좌우 간격
+LAYOUT_GAP = 40 # PDF 좌우 간격
 
 def get_banner_id(href):
     if not href: return "unknown"
@@ -27,31 +29,41 @@ def get_banner_id(href):
     segments = clean_path.split('/')
     return segments[-1] if segments[-1] else segments[-2]
 
-def resize_image(image_path, target_width):
-    """이미지 비율을 유지하며 너비 변경"""
+def resize_image_high_quality(image_path, target_width):
+    """이미지를 고화질(LANCZOS)로 리사이징하고 높이를 반환"""
     try:
         img = Image.open(image_path)
+        # 비율 계산
         w_percent = (target_width / float(img.size[0]))
         h_size = int((float(img.size[1]) * float(w_percent)))
+        
+        # 고품질 리사이징
         img = img.resize((target_width, h_size), Image.Resampling.LANCZOS)
-        img.save(image_path)
+        img.save(image_path, quality=95) # 화질 95% 저장
         return h_size
     except Exception as e:
         print(f"⚠️ 리사이징 실패: {e}")
         return 0
 
 def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
+    """[웹(1100)] [간격] [앱(353)] 배치로 PDF 생성"""
     try:
+        # 이미지는 위에서 resize_image_high_quality로 이미 사이즈가 조정된 상태임
         image1 = Image.open(web_img_path).convert('RGB')
         image2 = Image.open(app_img_path).convert('RGB')
 
         max_height = max(image1.height, image2.height)
         total_width = image1.width + image2.width + LAYOUT_GAP
         
+        # 흰색 배경 캔버스
         new_image = Image.new('RGB', (total_width, max_height), (255, 255, 255))
+        
+        # 웹(왼쪽) 배치
         new_image.paste(image1, (0, 0))
+        # 앱(오른쪽) 배치 - 상단 정렬
         new_image.paste(image2, (image1.width + LAYOUT_GAP, 0))
         
+        # PDF 저장 (해상도 유지)
         new_image.save(output_pdf_path, "PDF", resolution=100.0, save_all=True)
         print(f"📄 PDF 생성 완료: {output_pdf_path}")
     except Exception as e:
@@ -61,6 +73,7 @@ def handle_popup(page):
     try:
         page.keyboard.press("Escape")
         time.sleep(0.5)
+        # 다양한 팝업/모달 닫기 시도
         if page.locator("div[class*='Modal']").is_visible() or page.locator("#carousel").is_visible():
             close_btn = page.locator("button[class*='close'], button[aria-label*='Close'], button[aria-label*='닫기']").first
             if close_btn.is_visible():
@@ -72,13 +85,12 @@ def handle_popup(page):
         pass
 
 def get_dynamic_clip_height(page, min_height):
-    """배너 리스트의 바닥 좌표를 계산하여 반환"""
+    """배너 리스트의 실제 바닥 좌표를 계산"""
     return page.evaluate(f"""() => {{
         const slider = document.querySelector("ul[class*='BannerArea_MainBannerArea__slider']");
         if (slider) {{
             const rect = slider.getBoundingClientRect();
-            // 스크롤 위치 + 요소 바닥 + 여유분 60px
-            return rect.bottom + window.scrollY + 60;
+            return rect.bottom + window.scrollY + 60; // 여유분 60px
         }}
         return {min_height};
     }}""")
@@ -90,10 +102,10 @@ def main():
         print("🚀 브라우저 실행 중 (고화질)...")
         browser = p.chromium.launch(headless=True)
         
-        # [Web 컨텍스트] 3개 노출을 위해 1280px로 시작
+        # [Web 컨텍스트] 3개 노출을 위해 1480px로 시작 (2배율 고화질)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H},
+            viewport={"width": WEB_VIEWPORT_W, "height": WEB_RENDER_HEIGHT},
             device_scale_factor=2
         )
         page = context.new_page()
@@ -131,7 +143,7 @@ def main():
             print(f"\n--- [{idx+1}/{count}] 목표: {target['id']} 찾는 중 ---")
             found = False
             
-            # (A) 전략 1: 새로고침 (Preload/Eager용)
+            # (A) 전략 1: 새로고침 (Preload/Eager용) - 최대 10회
             for r in range(10):
                 if r > 0: 
                     page.reload()
@@ -151,25 +163,27 @@ def main():
                 except:
                     pass
             
-            # (B) 전략 2: 페이지네이션 (Lazy용 - 위치 검증 로직 추가)
+            # (B) 전략 2: 페이지네이션 (Lazy용)
             if not found:
-                print(f"   ⚠️ 페이지네이션 탐색 시작 (위치 검증 포함)")
+                print(f"   ⚠️ 페이지네이션 탐색 시작")
                 target_locator = page.locator(f"li[class*='BannerArea_MainBannerArea__slider__slide'] a[href='{target['href']}']")
                 next_btn = page.locator('button[aria-label="다음"]').first
                 
-                for c in range(25):
-                    # [핵심 수정] 단순히 존재하는 게 아니라, 화면 좌측(X < 100)에 있는지 확인
+                for c in range(25): # 최대 25번 클릭
+                    # 위치 검증 (화면 좌측에 왔는지)
                     if target_locator.count() > 0:
                         box = target_locator.first.bounding_box()
-                        if box and 0 <= box['x'] < 300: # 300px 이내면 첫 번째 혹은 두 번째 자리
+                        if box and 0 <= box['x'] < 300:
                             print(f"   ✨ [페이지네이션] {c}번 이동 후 화면 노출 확인!")
                             found = True
                             break
                     
-                    if next_btn.is_visible():
+                    # [핵심 수정] 버튼이 활성화(Enabled) 상태인지 확인 후 클릭
+                    if next_btn.is_visible() and next_btn.is_enabled():
                         next_btn.click()
-                        time.sleep(1.5) # 애니메이션 대기 시간 늘림
+                        time.sleep(1.5)
                     else:
+                        print("   ⛔ 더 이상 '다음'으로 이동할 수 없습니다. (마지막 슬라이드)")
                         break
 
             # 3. 캡쳐 및 전송
@@ -178,39 +192,37 @@ def main():
                 app_png = f"app_{idx}.png"
                 pdf_filename = f"{datetime.now().strftime('%y%m%d')}_{target['id']}_게재보고.pdf"
 
-                # (1) WEB 캡쳐 (3개 노출 보장 + 리사이징 + 높이 자동)
+                # (1) WEB 캡쳐 (1480px -> 1100px 리사이징)
                 try:
-                    # 넓은 화면(1280)으로 설정해 3개 노출 유도
-                    page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H})
+                    page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_RENDER_HEIGHT})
                     time.sleep(0.5)
                     handle_popup(page)
                     
                     clip_height = get_dynamic_clip_height(page, 800)
                     
-                    # 캡쳐는 1280폭으로 찍고 (3개 다 나오게)
+                    # 3개 노출을 위해 1480px 폭으로 찍음
                     page.screenshot(path=web_png, clip={"x": 0, "y": 0, "width": WEB_VIEWPORT_W, "height": clip_height})
                     
-                    # 이미지를 1100폭으로 리사이징 (파일 규격 맞춤)
-                    resize_image(web_png, WEB_TARGET_WIDTH)
-                    print(f"     📸 Web 캡쳐 완료 (3개 노출 -> 1100px 리사이징)")
+                    # 찍은 후 1100px로 리사이징 (파일 크기 및 PDF 배치 최적화)
+                    resize_image_high_quality(web_png, WEB_TARGET_WIDTH)
+                    print(f"     📸 Web 캡쳐 완료")
                 except Exception as e:
                     print(f"     ❌ Web 캡쳐 에러: {e}")
 
-                # (2) APP 캡쳐 (높이 자동 계산)
+                # (2) APP 캡쳐 (353px 사이즈 맞춤)
                 try:
                     page.set_viewport_size({"width": APP_WIDTH, "height": APP_HEIGHT})
                     time.sleep(1)
                     handle_popup(page)
                     
-                    # 모바일에서도 배너 끝까지 계산
                     mobile_clip_height = get_dynamic_clip_height(page, 765)
-                    
-                    # 뷰포트는 고정하되, 캡쳐는 길게(clip)
-                    # *clip을 쓰려면 viewport보다 내용이 길어야 하므로 viewport 높이를 잠시 늘려줍니다*
                     page.set_viewport_size({"width": APP_WIDTH, "height": int(mobile_clip_height + 100)})
                     
                     page.screenshot(path=app_png, clip={"x": 0, "y": 0, "width": APP_WIDTH, "height": mobile_clip_height})
-                    print(f"     📸 App 캡쳐 완료 (높이 자동 조절: {int(mobile_clip_height)})")
+                    
+                    # 모바일 이미지도 정확한 353px 너비로 리사이징 (고화질 유지)
+                    resize_image_high_quality(app_png, APP_TARGET_WIDTH)
+                    print(f"     📸 App 캡쳐 완료")
                 except Exception as e:
                     print(f"     ❌ App 캡쳐 에러: {e}")
 
@@ -233,8 +245,8 @@ def main():
                     for f in [web_png, app_png, pdf_filename]:
                         if os.path.exists(f): os.remove(f)
                 
-                # Web 사이즈 복구 (다음 탐색을 위해)
-                page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H})
+                # Web 사이즈 복구
+                page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_RENDER_HEIGHT})
             else:
                 print(f"   ❌ {target['id']} 미발견 (Skip)")
 
@@ -242,4 +254,4 @@ def main():
         browser.close()
 
 if __name__ == "__main__":
-    main()   
+    main()
