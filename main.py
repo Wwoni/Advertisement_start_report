@@ -74,14 +74,14 @@ def get_unique_banners(page, slider_selector: str) -> List[Dict[str, Any]]:
 def move_slider_to_offset(page, slider_selector: str, offset: float):
     """슬라이더를 강제로 특정 offset까지 translate3d로 이동"""
     page.evaluate(
-        """(selector, off) => {
+        """(params) => {
+            const { selector, off } = params;
             const ul = document.querySelector(selector);
             if (!ul) return;
             ul.style.transition = 'none';
             ul.style.transform = `translate3d(${-off}px, 0, 0)`;
         }""",
-        slider_selector,
-        offset,
+        {"selector": slider_selector, "off": float(offset)},
     )
     # lazy 이미지 로딩 여유
     time.sleep(0.7)
@@ -128,15 +128,15 @@ def handle_app_popup(page):
 def get_clip_height(page, slider_selector: str, min_height: int) -> int:
     """배너 블럭의 실제 높이 + 여백 만큼만 캡쳐"""
     h = page.evaluate(
-        """(selector, fallback) => {
+        """(params) => {
+            const { selector, fallback } = params;
             const el = document.querySelector(selector);
             if (!el) return fallback;
             const rect = el.getBoundingClientRect();
             const bottom = rect.bottom + window.scrollY;
             return Math.max(fallback, Math.ceil(bottom + 40));
         }""",
-        slider_selector,
-        min_height,
+        {"selector": slider_selector, "fallback": int(min_height)},
     )
     return int(h)
 
@@ -165,7 +165,7 @@ def capture_web_banners(page, banners: List[Dict[str, Any]], out_dir: str) -> Li
         page.screenshot(
             path=filename,
             clip={"x": 0, "y": 0, "width": WEB_WIDTH, "height": clip_h},
-            scale="css",
+            scale="css",          # CSS px 그대로 (추가 확대/축소 없음)
             full_page=False,
             type="png",
         )
