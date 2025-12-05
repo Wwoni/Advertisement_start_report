@@ -13,11 +13,12 @@ SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
 # --- 캡쳐 해상도 / 레이아웃 설정 ---
-WEB_WIDTH = 1100   # PDF 안에서 보이는 Web 가로 폭
-WEB_MIN_HEIGHT = 750
+# "브라우저에서 보이는 화면 그대로" 기준
+WEB_WIDTH = 1100
+WEB_HEIGHT = 900   # 하단 배너까지 보이도록 넉넉히
 
-APP_WIDTH = 353    # PDF 안에서 보이는 App 가로 폭
-APP_MIN_HEIGHT = 760
+APP_WIDTH = 353
+APP_HEIGHT = 780   # 모바일 한 화면 기준
 
 GAP = 40  # Web / App 사이 간격(px)
 
@@ -96,7 +97,6 @@ def handle_desktop_popup(page):
         pass
 
     try:
-        # 공통 모달 / 배너 닫기 버튼
         close_btn = page.locator(
             "button[aria-label*='닫기'], button[class*='close'], "
             "div[id*='Modal'] button, div[class*='Modal'] button"
@@ -125,30 +125,17 @@ def handle_app_popup(page):
         pass
 
 
-def get_clip_height(page, slider_selector: str, min_height: int) -> int:
-    """배너 블럭의 실제 높이 + 여백 만큼만 캡쳐"""
-    h = page.evaluate(
-        """(params) => {
-            const { selector, fallback } = params;
-            const el = document.querySelector(selector);
-            if (!el) return fallback;
-            const rect = el.getBoundingClientRect();
-            const bottom = rect.bottom + window.scrollY;
-            return Math.max(fallback, Math.ceil(bottom + 40));
-        }""",
-        {"selector": slider_selector, "fallback": int(min_height)},
-    )
-    return int(h)
-
-
 def capture_web_banners(page, banners: List[Dict[str, Any]], out_dir: str) -> List[Dict[str, Any]]:
-    """PC 웹 배너 전체 캡쳐 → 파일경로 리스트 반환"""
+    """PC 웹 배너 전체 캡쳐 → viewport 전체 캡쳐"""
     slider_selector = "ul[class*='BannerArea_MainBannerArea__slider']"
     results = []
 
     if not banners:
         print("❌ Web 배너 목록이 비어 있습니다.")
         return results
+
+    view_size = page.viewport_size
+    clip_h = view_size["height"]
 
     print(f"📊 Web 배너 {len(banners)}개 캡쳐 시도 (고유 ID 기준)")
 
@@ -157,17 +144,17 @@ def capture_web_banners(page, banners: List[Dict[str, Any]], out_dir: str) -> Li
         offset = b.get("offset", 0)
         print(f"[WEB] {idx+1}/{len(banners)} - {banner_id} (offset={offset})")
 
+        # 해당 배너가 왼쪽에 오도록 슬라이더 이동
         move_slider_to_offset(page, slider_selector, offset)
 
-        clip_h = get_clip_height(page, slider_selector, WEB_MIN_HEIGHT)
         filename = os.path.join(out_dir, f"web_{idx}_{banner_id}.png")
 
         page.screenshot(
             path=filename,
             clip={"x": 0, "y": 0, "width": WEB_WIDTH, "height": clip_h},
-            scale="css",          # CSS px 그대로 (추가 확대/축소 없음)
-            full_page=False,
-            type="png",
+            type="png",          # PNG로 고해상도 유지
+            full_page=False,     # viewport 영역만
+            # scale 기본값 'device' → device_scale_factor 반영 (2배 해상도)
         )
         print(f"   ✅ Web 캡쳐 완료: {filename}")
         results.append({"id": banner_id, "path": filename})
@@ -175,7 +162,7 @@ def capture_web_banners(page, banners: List[Dict[str, Any]], out_dir: str) -> Li
 
 
 def capture_app_banners(page, web_banners: List[Dict[str, Any]], out_dir: str) -> List[Dict[str, Any]]:
-    """모바일 App 배너를 Web 순서에 맞춰 캡쳐"""
+    """모바일 App 배너를 Web 순서에 맞춰 캡쳐 (viewport 전체)"""
     slider_selector = "ul[class*='BannerArea_MainBannerArea__slider']"
 
     app_banners = get_unique_banners(page, slider_selector)
@@ -185,6 +172,9 @@ def capture_app_banners(page, web_banners: List[Dict[str, Any]], out_dir: str) -
 
     app_index = {get_banner_id(b["href"]): b for b in app_banners}
     results = []
+
+    view_size = page.viewport_size
+    clip_h = view_size["height"]
 
     print(f"📊 App 배너 고유 {len(app_index)}개 (DOM 기준 {len(app_banners)}개)")
 
@@ -199,15 +189,13 @@ def capture_app_banners(page, web_banners: List[Dict[str, Any]], out_dir: str) -
 
         move_slider_to_offset(page, slider_selector, app_info.get("offset", 0))
 
-        clip_h = get_clip_height(page, slider_selector, APP_MIN_HEIGHT)
         filename = os.path.join(out_dir, f"app_{idx}_{banner_id}.png")
 
         page.screenshot(
             path=filename,
             clip={"x": 0, "y": 0, "width": APP_WIDTH, "height": clip_h},
-            scale="css",
-            full_page=False,
             type="png",
+            full_page=False,
         )
         print(f"   ✅ App 캡쳐 완료: {filename}")
         results.append({"id": banner_id, "path": filename})
@@ -218,13 +206,12 @@ def capture_app_banners(page, web_banners: List[Dict[str, Any]], out_dir: str) -
 def create_pdf_pairs(web_caps, app_caps, out_dir: str) -> None:
     """
     Web / App 짝이 맞는 것만 골라 PDF 생성.
-    - 상단 title(텍스트)는 넣지 않음
-    - PNG 원본 그대로 PDF에 삽입 (별도 리사이징 X)
+    - 상단 title 텍스트는 넣지 않음
+    - PNG 원본 그대로 PDF에 삽입 (리사이즈 X)
     """
     client = WebClient(token=SLACK_TOKEN) if SLACK_TOKEN else None
     today_prefix = datetime.now().strftime("%y%m%d")
 
-    # id → path 매핑
     web_map = {w["id"]: w["path"] for w in web_caps}
     app_map = {a["id"]: a["path"] for a in app_caps}
 
@@ -238,7 +225,6 @@ def create_pdf_pairs(web_caps, app_caps, out_dir: str) -> None:
         web_img = Image.open(web_path).convert("RGB")
         app_img = Image.open(app_path).convert("RGB")
 
-        # 새 캔버스 사이즈 계산 (px 기준)
         canvas_height = max(web_img.height, app_img.height)
         canvas_width = web_img.width + GAP + app_img.width
 
@@ -249,7 +235,7 @@ def create_pdf_pairs(web_caps, app_caps, out_dir: str) -> None:
         pdf_name = f"{today_prefix}_{bid}_게재보고.pdf"
         pdf_path = os.path.join(out_dir, pdf_name)
 
-        # PNG→PDF: Pillow 기본 72 DPI 사용 (원본 픽셀 그대로, 선명도 유지)
+        # PNG 고해상도 그대로 PDF에 넣기 (별도 DPI 조정 없음)
         canvas.save(pdf_path, "PDF")
 
         print(f"📄 PDF 생성 완료: {pdf_path}")
@@ -271,8 +257,8 @@ def main():
 
         # ---------------- Web (PC) ----------------
         context_web = browser.new_context(
-            viewport={"width": WEB_WIDTH, "height": WEB_MIN_HEIGHT},
-            device_scale_factor=1.0,
+            viewport={"width": WEB_WIDTH, "height": WEB_HEIGHT},
+            device_scale_factor=2.0,   # Retina 비슷한 2배 해상도
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -297,13 +283,12 @@ def main():
             return
 
         print(f"📊 Web DOM 기준 배너 수: {len(web_banners)}")
-
         web_caps = capture_web_banners(page_web, web_banners, out_dir)
 
         # ---------------- App (Mobile) ----------------
         context_app = browser.new_context(
-            viewport={"width": APP_WIDTH, "height": APP_MIN_HEIGHT},
-            device_scale_factor=1.0,
+            viewport={"width": APP_WIDTH, "height": APP_HEIGHT},
+            device_scale_factor=2.0,
             is_mobile=True,
             user_agent=(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
