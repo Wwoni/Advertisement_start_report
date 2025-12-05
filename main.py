@@ -53,7 +53,6 @@ def resize_image_high_quality(image_path, target_width):
 
 def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
     """
-    두 번째 예시 PDF처럼:
     - 상단: 제목 (파일명 기반)
     - 중간: 좌 WEB, 우 MOBILE
     - 하단: 'WEB(PC)' / 'MOBILE(APP)' 레이블
@@ -73,18 +72,17 @@ def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
         page_width = content_width + margin_x * 2
 
         content_height = max(image1.height, image2.height)
-        # 레이블 영역 조금 추가
         page_height = margin_y + title_gap + content_height + label_gap + 120
 
         # 흰 배경 페이지 생성
         page = Image.new('RGB', (page_width, page_height), (255, 255, 255))
         draw = ImageDraw.Draw(page)
 
-        # 기본 폰트 (시스템 폰트 경로 지정까지 가면 귀찮아지니 일단 기본)
+        # 기본 폰트
         font_title = ImageFont.load_default()
         font_label = ImageFont.load_default()
 
-        # 제목: 파일명(확장자 제거) 그대로 사용
+        # 제목: 파일명(확장자 제거)
         title_text = os.path.splitext(os.path.basename(output_pdf_path))[0]
         draw.text((margin_x, margin_y), title_text, fill=(0, 0, 0), font=font_title)
 
@@ -132,8 +130,6 @@ def hide_small_fixed_banners(page):
     """
     App 화면 하단에 떠 있는 '앱 설치 유도' 같은
     작은 fixed 배너들 제거.
-    - bottom 근처
-    - 전체 폭보다 충분히 좁은 요소만 제거
     """
     js = """
     () => {
@@ -186,12 +182,12 @@ def get_dynamic_clip_height(page, selector, min_height):
 def get_leftmost_banner_id(page):
     """
     현재 뷰포트에 보이는 메인 배너 슬라이드 중
-    '가장 왼쪽' 배너의 ID 반환
+    '가장 왼쪽' 배너의 ID 반환 (전역 li 셀렉터 기준)
     """
     js = """
     () => {
         const slides = Array.from(
-            document.querySelectorAll("section[class*='BannerArea_MainBannerArea'] li[class*='BannerArea_MainBannerArea__slider__slide']")
+            document.querySelectorAll("li[class*='BannerArea_MainBannerArea__slider__slide']")
         );
         if (!slides.length) return null;
 
@@ -223,11 +219,12 @@ def get_leftmost_banner_id(page):
 def capture_web_banner_area(page, image_path):
     """
     Web 메인 배너 영역만 캡쳐.
-    section 기준으로 안 잡히면 기존 clip 방식 fallback.
+    section 기준으로 시도 후 안 되면 상단 clip fallback.
     """
     try:
-        container = page.locator("section[class*='BannerArea_MainBannerArea']").first
-        if container.count() > 0:
+        section_locator = page.locator("section[class*='BannerArea_MainBannerArea']")
+        if section_locator.count() > 0:
+            container = section_locator.first
             container.screenshot(path=image_path)
             return
 
@@ -272,62 +269,82 @@ def main():
         time.sleep(3)
         handle_popup(page_web)
 
-        # 메인 배너 섹션 안에서만 슬라이드/버튼 찾기
-        banner_section = page_web.locator("section[class*='BannerArea_MainBannerArea']").first
+        # ✅ 전역 슬라이드 셀렉터 기준으로 먼저 대기 (기존 코드 방식 복구)
         try:
-            banner_section.locator(
-                "li[class*='BannerArea_MainBannerArea__slider__slide']"
-            ).first.wait_for(state="visible", timeout=15000)
+            page_web.wait_for_selector(
+                "li[class*='BannerArea_MainBannerArea__slider__slide']",
+                state="visible",
+                timeout=15000
+            )
         except Exception:
             print("❌ 메인 배너 로딩 실패")
             browser.close()
             return
 
-        slides = banner_section.locator("li[class*='BannerArea_MainBannerArea__slider__slide']")
+        # 슬라이드 & next 버튼은 "섹션 있으면 섹션 기준, 없으면 전역"으로 선택
+        slides = page_web.locator("li[class*='BannerArea_MainBannerArea__slider__slide']")
         total_dom_slides = slides.count()
         print(f"📊 총 {total_dom_slides}개의 슬라이드 DOM 발견 (Web)")
 
-        next_btn = banner_section.locator('button[aria-label="다음"]').first
+        # next 버튼 선택 (섹션 기준 우선, 없으면 전역 fallback)
+        section_locator = page_web.locator("section[class*='BannerArea_MainBannerArea']")
+        if section_locator.count() > 0:
+            next_btn_locator = section_locator.locator('button[aria-label="다음"]')
+        else:
+            next_btn_locator = page_web.locator('button[aria-label="다음"]')
 
-        # 왼쪽 맨 앞 배너 기준으로 순차 캡쳐
-        captured_infos = []
-        captured_ids = set()
-        step = 0
-        max_steps = 50  # 안전장치
-
-        while True:
-            current_id = get_leftmost_banner_id(page_web)
-            print(f"[DEBUG] step {step}, 현재 왼쪽 배너 ID = {current_id}")
-
-            if current_id and current_id not in captured_ids:
-                # 새 배너 발견 → 캡쳐
-                idx = len(captured_infos)
-                web_filename = f"web_{idx}.jpg"
+        if next_btn_locator.count() == 0:
+            print("⚠️ '다음' 버튼을 찾지 못했습니다. 첫 화면만 캡쳐하고 종료합니다.")
+            # 첫 화면만 캡쳐
+            captured_infos = []
+            banner_id = get_leftmost_banner_id(page_web)
+            if banner_id:
+                web_filename = "web_0.jpg"
                 capture_web_banner_area(page_web, web_filename)
                 resize_image_high_quality(web_filename, WEB_TARGET_WIDTH)
+                captured_infos.append({"id": banner_id, "web_filename": web_filename})
+            else:
+                captured_infos = []
+        else:
+            next_btn = next_btn_locator.first
 
-                captured_infos.append({"id": current_id, "web_filename": web_filename})
-                captured_ids.add(current_id)
-                print(f"   ✅ Web 캡쳐 완료: {web_filename} (banner_id={current_id})")
+            # 왼쪽 맨 앞 배너 기준으로 순차 캡쳐
+            captured_infos = []
+            captured_ids = set()
+            step = 0
+            max_steps = 50  # 안전장치
 
-            step += 1
-            if step >= max_steps:
-                print("[WARN] max_steps에 도달하여 Web 순회를 종료합니다.")
-                break
+            while True:
+                current_id = get_leftmost_banner_id(page_web)
+                print(f"[DEBUG] step {step}, 현재 왼쪽 배너 ID = {current_id}")
 
-            # '다음' 버튼 상태 확인
-            try:
-                if not next_btn.is_visible():
-                    print("[INFO] '다음' 버튼이 더 이상 보이지 않아 순회를 종료합니다.")
+                if current_id and current_id not in captured_ids:
+                    idx = len(captured_infos)
+                    web_filename = f"web_{idx}.jpg"
+                    capture_web_banner_area(page_web, web_filename)
+                    resize_image_high_quality(web_filename, WEB_TARGET_WIDTH)
+
+                    captured_infos.append({"id": current_id, "web_filename": web_filename})
+                    captured_ids.add(current_id)
+                    print(f"   ✅ Web 캡쳐 완료: {web_filename} (banner_id={current_id})")
+
+                step += 1
+                if step >= max_steps:
+                    print("[WARN] max_steps에 도달하여 Web 순회를 종료합니다.")
                     break
-                if next_btn.is_disabled():
-                    print("[INFO] '다음' 버튼이 disabled 상태입니다. 마지막 슬라이드로 판단하고 종료합니다.")
+
+                try:
+                    if not next_btn.is_visible():
+                        print("[INFO] '다음' 버튼이 더 이상 보이지 않아 순회를 종료합니다.")
+                        break
+                    if next_btn.is_disabled():
+                        print("[INFO] '다음' 버튼이 disabled 상태입니다. 마지막 슬라이드로 판단하고 종료합니다.")
+                        break
+                    next_btn.click()
+                    page_web.wait_for_timeout(900)
+                except Exception as e:
+                    print(f"[ERROR] next 버튼 클릭 실패: {e}")
                     break
-                next_btn.click()
-                page_web.wait_for_timeout(900)  # 애니메이션 + lazy 로딩 대기
-            except Exception as e:
-                print(f"[ERROR] next 버튼 클릭 실패: {e}")
-                break
 
         print(f"📊 최종 캡쳐된 Web 배너 수: {len(captured_infos)}")
         print("   IDs:", [c['id'] for c in captured_infos])
@@ -356,7 +373,6 @@ def main():
         page_app.goto(TARGET_URL)
         time.sleep(2)
         handle_popup(page_app)
-        # 하단 앱 설치 배너 등 제거
         hide_small_fixed_banners(page_app)
 
         for idx, info in enumerate(captured_infos):
@@ -366,7 +382,6 @@ def main():
             print(f"\n📸 [App] {idx+1}/{len(captured_infos)} - {banner_id} 캡쳐 중...")
 
             try:
-                # App에서도 메인 배너 섹션 기준으로 캡쳐 (특정 배너 정렬은 일단 보류, 상단 영역 통째로)
                 clip_h = get_dynamic_clip_height(
                     page_app,
                     "ul[class*='BannerArea_MainBannerArea__slider']",
@@ -380,11 +395,9 @@ def main():
                     clip={"x": 0, "y": 0, "width": APP_VIEWPORT_W, "height": clip_h}
                 )
 
-                # 리사이징
                 resize_image_high_quality(app_filename, APP_TARGET_WIDTH)
                 print(f"   ✅ App 캡쳐 완료: {app_filename}")
 
-                # [Step 3] PDF 생성 및 전송
                 pdf_filename = f"{datetime.now().strftime('%y%m%d')}_{banner_id}_게재보고.pdf"
                 create_custom_layout_pdf(web_filename, app_filename, pdf_filename)
 
@@ -397,7 +410,6 @@ def main():
                     )
                     print(f"   🚀 슬랙 전송 완료")
 
-                # 파일 정리
                 for f in (web_filename, app_filename, pdf_filename):
                     if os.path.exists(f):
                         os.remove(f)
