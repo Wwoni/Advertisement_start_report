@@ -1,6 +1,5 @@
 import os
 import time
-import random
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 from PIL import Image
@@ -12,48 +11,53 @@ SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
 # --- 캡쳐 설정 ---
-# Web: 너비 1100 고정. 높이는 2500으로 넉넉하게 렌더링 후, 실제 콘텐츠만큼만 오려냅니다.
-WEB_WIDTH = 1100 
-WEB_RENDER_HEIGHT = 2500 
+# [Web] 3개 노출을 위해 뷰포트는 1280으로 설정, 결과물은 1100으로 리사이징
+WEB_VIEWPORT_W = 1280 
+WEB_TARGET_WIDTH = 1100
+WEB_VIEWPORT_H = 2000 # 렌더링용 넉넉한 높이
 
-# App: 모바일 뷰포트
+# [App] 모바일 뷰포트
 APP_WIDTH, APP_HEIGHT = 353, 765
 
 LAYOUT_GAP = 40 # PDF 병합 시 좌우 간격
 
 def get_banner_id(href):
-    """링크에서 ID 추출"""
     if not href: return "unknown"
     clean_path = href.split('?')[0]
     segments = clean_path.split('/')
     return segments[-1] if segments[-1] else segments[-2]
 
+def resize_image(image_path, target_width):
+    """이미지 비율을 유지하며 너비 변경"""
+    try:
+        img = Image.open(image_path)
+        w_percent = (target_width / float(img.size[0]))
+        h_size = int((float(img.size[1]) * float(w_percent)))
+        img = img.resize((target_width, h_size), Image.Resampling.LANCZOS)
+        img.save(image_path)
+        return h_size
+    except Exception as e:
+        print(f"⚠️ 리사이징 실패: {e}")
+        return 0
+
 def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
-    """[웹] [간격] [앱] 배치로 고화질 PDF 생성"""
     try:
         image1 = Image.open(web_img_path).convert('RGB')
         image2 = Image.open(app_img_path).convert('RGB')
 
-        # 높이는 둘 중 큰 것에 맞춤 (웹 이미지가 길어질 것이므로 웹 기준이 될 가능성 높음)
         max_height = max(image1.height, image2.height)
         total_width = image1.width + image2.width + LAYOUT_GAP
         
-        # 흰색 배경 캔버스
         new_image = Image.new('RGB', (total_width, max_height), (255, 255, 255))
-        
-        # 웹(왼쪽), 앱(오른쪽) 배치
         new_image.paste(image1, (0, 0))
-        # 앱 이미지는 상단 정렬 (또는 중앙 정렬 원하시면 수정 가능)
         new_image.paste(image2, (image1.width + LAYOUT_GAP, 0))
         
-        # PDF 저장 (해상도 유지)
         new_image.save(output_pdf_path, "PDF", resolution=100.0, save_all=True)
         print(f"📄 PDF 생성 완료: {output_pdf_path}")
     except Exception as e:
         print(f"❌ PDF 생성 실패: {e}")
 
 def handle_popup(page):
-    """팝업 감지 및 닫기"""
     try:
         page.keyboard.press("Escape")
         time.sleep(0.5)
@@ -62,10 +66,22 @@ def handle_popup(page):
             if close_btn.is_visible():
                 close_btn.click()
             else:
-                page.mouse.click(10, 10) # 좌표 클릭
+                page.mouse.click(10, 10)
             time.sleep(1)
     except Exception:
         pass
+
+def get_dynamic_clip_height(page, min_height):
+    """배너 리스트의 바닥 좌표를 계산하여 반환"""
+    return page.evaluate(f"""() => {{
+        const slider = document.querySelector("ul[class*='BannerArea_MainBannerArea__slider']");
+        if (slider) {{
+            const rect = slider.getBoundingClientRect();
+            // 스크롤 위치 + 요소 바닥 + 여유분 60px
+            return rect.bottom + window.scrollY + 60;
+        }}
+        return {min_height};
+    }}""")
 
 def main():
     client = WebClient(token=SLACK_TOKEN)
@@ -74,17 +90,15 @@ def main():
         print("🚀 브라우저 실행 중 (고화질)...")
         browser = p.chromium.launch(headless=True)
         
-        # [Web 컨텍스트] 고화질(2배율), 너비 1100, 높이 2500(충분히 길게)
+        # [Web 컨텍스트] 3개 노출을 위해 1280px로 시작
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            viewport={"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT},
+            viewport={"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H},
             device_scale_factor=2
         )
         page = context.new_page()
 
-        # ---------------------------------------------------------
-        # [Step 1] 전체 배너 리스트 파악
-        # ---------------------------------------------------------
+        # 1. 접속 및 초기화
         print(f"🌐 접속 중: {TARGET_URL}")
         page.goto(TARGET_URL)
         time.sleep(3)
@@ -93,7 +107,7 @@ def main():
         try:
             page.wait_for_selector("li[class*='BannerArea_MainBannerArea__slider__slide']", state="visible", timeout=15000)
         except:
-            print("❌ 배너 로딩 실패. 종료합니다.")
+            print("❌ 배너 로딩 실패")
             browser.close()
             return
 
@@ -101,7 +115,6 @@ def main():
         count = slides.count()
         print(f"📊 총 배너 수: {count}")
 
-        # 타겟 리스트 생성
         target_banners = []
         for i in range(count):
             try:
@@ -113,16 +126,13 @@ def main():
         
         print(f"🎯 목표 ID 목록: {[b['id'] for b in target_banners]}")
 
-        # ---------------------------------------------------------
-        # [Step 2] 배너별 탐색 (새로고침 -> 페이지네이션)
-        # ---------------------------------------------------------
+        # 2. 탐색 및 캡쳐 루프
         for idx, target in enumerate(target_banners):
             print(f"\n--- [{idx+1}/{count}] 목표: {target['id']} 찾는 중 ---")
             found = False
             
-            # (A) 전략 1: 새로고침 (Preload/Eager용) - 최대 10회
-            refresh_limit = 10
-            for r in range(refresh_limit):
+            # (A) 전략 1: 새로고침 (Preload/Eager용)
+            for r in range(10):
                 if r > 0: 
                     page.reload()
                     handle_popup(page)
@@ -131,7 +141,6 @@ def main():
                     except:
                         continue
 
-                # 첫 번째 슬라이드 확인
                 try:
                     first_slide = page.locator("li[class*='BannerArea_MainBannerArea__slider__slide']").first
                     first_href = first_slide.locator("a").get_attribute("href")
@@ -142,71 +151,66 @@ def main():
                 except:
                     pass
             
-            # (B) 전략 2: 페이지네이션 (Lazy용) - 새로고침으로 못 찾은 경우
+            # (B) 전략 2: 페이지네이션 (Lazy용 - 위치 검증 로직 추가)
             if not found:
-                print(f"   ⚠️ 페이지네이션 탐색 시작 (Lazy 배너)")
-                # 해당 배너의 a태그를 포함한 li 요소 찾기
+                print(f"   ⚠️ 페이지네이션 탐색 시작 (위치 검증 포함)")
                 target_locator = page.locator(f"li[class*='BannerArea_MainBannerArea__slider__slide'] a[href='{target['href']}']")
                 next_btn = page.locator('button[aria-label="다음"]').first
                 
-                max_clicks = 25
-                for c in range(max_clicks):
-                    if target_locator.is_visible():
-                        print(f"   ✨ [페이지네이션] {c}번 이동 후 발견!")
-                        found = True
-                        break
+                for c in range(25):
+                    # [핵심 수정] 단순히 존재하는 게 아니라, 화면 좌측(X < 100)에 있는지 확인
+                    if target_locator.count() > 0:
+                        box = target_locator.first.bounding_box()
+                        if box and 0 <= box['x'] < 300: # 300px 이내면 첫 번째 혹은 두 번째 자리
+                            print(f"   ✨ [페이지네이션] {c}번 이동 후 화면 노출 확인!")
+                            found = True
+                            break
                     
                     if next_btn.is_visible():
                         next_btn.click()
-                        time.sleep(1)
+                        time.sleep(1.5) # 애니메이션 대기 시간 늘림
                     else:
                         break
 
-            # -----------------------------------------------------
-            # [Step 3] 캡쳐 및 전송 (발견 시)
-            # -----------------------------------------------------
+            # 3. 캡쳐 및 전송
             if found:
                 web_png = f"web_{idx}.png"
                 app_png = f"app_{idx}.png"
                 pdf_filename = f"{datetime.now().strftime('%y%m%d')}_{target['id']}_게재보고.pdf"
 
-                # (1) WEB 캡쳐 (하단 잘림 방지 로직 적용)
+                # (1) WEB 캡쳐 (3개 노출 보장 + 리사이징 + 높이 자동)
                 try:
-                    # 뷰포트를 길게 설정하여 내용이 다 나오게 함
-                    page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT})
+                    # 넓은 화면(1280)으로 설정해 3개 노출 유도
+                    page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H})
                     time.sleep(0.5)
                     handle_popup(page)
                     
-                    # [핵심] 자바스크립트로 배너 영역의 '바닥(Bottom)' 좌표를 계산
-                    clip_height = page.evaluate("""() => {
-                        // '지금 주목할 소식' 배너 리스트(ul)를 찾음
-                        const bannerList = document.querySelector("ul[class*='BannerArea_MainBannerArea__slider']");
-                        
-                        if (bannerList) {
-                            const rect = bannerList.getBoundingClientRect();
-                            // 요소의 바닥 좌표 + 스크롤 위치 + 여유분(50px)
-                            return rect.bottom + window.scrollY + 50;
-                        }
-                        // 요소를 못 찾았을 경우 안전하게 900px 반환
-                        return 900; 
-                    }""")
+                    clip_height = get_dynamic_clip_height(page, 800)
                     
-                    print(f"     📸 Web 캡쳐 (1100 x {int(clip_height)}) - 자동 높이 조절됨")
+                    # 캡쳐는 1280폭으로 찍고 (3개 다 나오게)
+                    page.screenshot(path=web_png, clip={"x": 0, "y": 0, "width": WEB_VIEWPORT_W, "height": clip_height})
                     
-                    # 계산된 높이만큼만 정확하게 잘라서 캡쳐 (clip)
-                    page.screenshot(path=web_png, clip={"x": 0, "y": 0, "width": WEB_WIDTH, "height": clip_height})
-                    
+                    # 이미지를 1100폭으로 리사이징 (파일 규격 맞춤)
+                    resize_image(web_png, WEB_TARGET_WIDTH)
+                    print(f"     📸 Web 캡쳐 완료 (3개 노출 -> 1100px 리사이징)")
                 except Exception as e:
                     print(f"     ❌ Web 캡쳐 에러: {e}")
 
-                # (2) APP 캡쳐 (뷰포트 353x765)
+                # (2) APP 캡쳐 (높이 자동 계산)
                 try:
                     page.set_viewport_size({"width": APP_WIDTH, "height": APP_HEIGHT})
                     time.sleep(1)
-                    handle_popup(page) # 모바일 팝업 제거
+                    handle_popup(page)
                     
-                    print(f"     📸 App 캡쳐 ({APP_WIDTH} x {APP_HEIGHT})")
-                    page.screenshot(path=app_png)
+                    # 모바일에서도 배너 끝까지 계산
+                    mobile_clip_height = get_dynamic_clip_height(page, 765)
+                    
+                    # 뷰포트는 고정하되, 캡쳐는 길게(clip)
+                    # *clip을 쓰려면 viewport보다 내용이 길어야 하므로 viewport 높이를 잠시 늘려줍니다*
+                    page.set_viewport_size({"width": APP_WIDTH, "height": int(mobile_clip_height + 100)})
+                    
+                    page.screenshot(path=app_png, clip={"x": 0, "y": 0, "width": APP_WIDTH, "height": mobile_clip_height})
+                    print(f"     📸 App 캡쳐 완료 (높이 자동 조절: {int(mobile_clip_height)})")
                 except Exception as e:
                     print(f"     ❌ App 캡쳐 에러: {e}")
 
@@ -226,18 +230,16 @@ def main():
                         except Exception as e:
                             print(f"     ❌ 슬랙 전송 실패: {e}")
                     
-                    # 파일 정리
                     for f in [web_png, app_png, pdf_filename]:
                         if os.path.exists(f): os.remove(f)
                 
-                # 다음 타겟을 위해 Web 사이즈 복구 (탐색 모드)
-                page.set_viewport_size({"width": WEB_WIDTH, "height": WEB_RENDER_HEIGHT})
+                # Web 사이즈 복구 (다음 탐색을 위해)
+                page.set_viewport_size({"width": WEB_VIEWPORT_W, "height": WEB_VIEWPORT_H})
             else:
-                print(f"   ❌ 결국 {target['id']}를 찾지 못했습니다. (건너뜀)")
+                print(f"   ❌ {target['id']} 미발견 (Skip)")
 
         print("\n✅ 모든 작업 완료!")
         browser.close()
 
 if __name__ == "__main__":
-    main()
-    
+    main()   
