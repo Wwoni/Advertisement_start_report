@@ -1,4 +1,4 @@
-   import os
+import os
 import time
 from datetime import datetime
 from playwright.sync_api import sync_playwright
@@ -239,5 +239,4 @@ def main():
         browser.close()
 
 if __name__ == "__main__":
-    main()
-    
+    main() 
