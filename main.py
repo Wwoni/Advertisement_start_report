@@ -11,20 +11,21 @@ SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL_ID")
 TARGET_URL = "https://www.wanted.co.kr"
 
 # --- [초고화질 및 레이아웃 설정] ---
+# Web: 1920px viewport, 고배율 캡쳐 후 1100px로 리사이즈
 WEB_VIEWPORT_W = 1920
 WEB_RENDER_HEIGHT = 2500
 WEB_TARGET_WIDTH = 1100   # WEB(PC) 최종 폭
 
-# iPhone 계열 비슷하게 잡기 (브라우저에서 보이는 한 화면 기준)
+# App: iPhone 비슷한 사이즈
 APP_VIEWPORT_W = 393
 APP_VIEWPORT_H = 852
 APP_TARGET_WIDTH = 353    # MOBILE(APP) 최종 폭
 
-LAYOUT_GAP = 60           # WEB / APP 사이 간격 (PDF 내)
+LAYOUT_GAP = 80           # PDF에서 Web / App 사이 간격
 
 
 # =========================
-#  공통 유틸 함수
+#  공통 유틸
 # =========================
 def get_banner_id(href: str) -> str:
     if not href:
@@ -40,8 +41,8 @@ def resize_image_high_quality(image_path, target_width):
         img = Image.open(image_path)
         img = img.convert("RGB")  # PDF 저장을 위해 RGB 통일
 
-        w_percent = (target_width / float(img.size[0]))
-        h_size = int((float(img.size[1]) * float(w_percent)))
+        w_percent = target_width / float(img.size[0])
+        h_size = int(float(img.size[1]) * w_percent)
 
         img = img.resize((target_width, h_size), Image.Resampling.LANCZOS)
         img.save(image_path, format="JPEG", quality=95, subsampling=0)
@@ -54,33 +55,27 @@ def resize_image_high_quality(image_path, target_width):
 def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
     """
     PDF 레이아웃:
-    - 상단 여백만 두고 바로 [WEB][GAP][APP] 배치
-    - 하단에 'WEB(PC)' / 'MOBILE(APP)' 라벨만 배치
-    - 상단 제목(파일명) 텍스트는 제거
+    - 상단 여백 + [WEB][GAP][APP]
+    - 상단 제목(파일명)은 완전히 제거
     """
     try:
-        image1 = Image.open(web_img_path).convert('RGB')
-        image2 = Image.open(app_img_path).convert('RGB')
+        image1 = Image.open(web_img_path).convert("RGB")
+        image2 = Image.open(app_img_path).convert("RGB")
 
-        # 페이지 여백 및 레이아웃 설정
-        margin_x = 60
-        margin_y = 60
-        label_gap = 40
+        margin_x = 40
+        margin_y = 40
+        label_gap = 30
 
-        # 페이지 전체 폭/높이 계산
         content_width = image1.width + image2.width + LAYOUT_GAP
         page_width = content_width + margin_x * 2
 
         content_height = max(image1.height, image2.height)
-        page_height = margin_y * 2 + content_height + label_gap + 80
+        page_height = margin_y * 2 + content_height + label_gap + 60
 
-        # 흰 배경 페이지 생성
-        page = Image.new('RGB', (page_width, page_height), (255, 255, 255))
+        page = Image.new("RGB", (page_width, page_height), (255, 255, 255))
         draw = ImageDraw.Draw(page)
-
         font_label = ImageFont.load_default()
 
-        # 이미지 배치 위치 (제목 없이 바로 이미지)
         image_top = margin_y
         web_left = margin_x
         app_left = margin_x + image1.width + LAYOUT_GAP
@@ -88,22 +83,21 @@ def create_custom_layout_pdf(web_img_path, app_img_path, output_pdf_path):
         page.paste(image1, (web_left, image_top))
         page.paste(image2, (app_left, image_top))
 
-        # 레이블 위치 (이미지 바로 아래쪽)
-        web_label_y = image_top + image1.height + 20
-        app_label_y = image_top + image2.height + 20
+        web_label_y = image_top + image1.height + 10
+        app_label_y = image_top + image2.height + 10
 
         draw.text((web_left, web_label_y), "WEB(PC)", fill=(0, 0, 0), font=font_label)
         draw.text((app_left, app_label_y), "MOBILE(APP)", fill=(0, 0, 0), font=font_label)
 
-        # PDF로 저장 (이미지를 그대로 박음)
-        page.save(output_pdf_path, "PDF", resolution=300.0, save_all=True)
+        # DPI를 72로 맞춰서 화면에서 더 크게 보이도록
+        page.save(output_pdf_path, "PDF", resolution=72.0, save_all=True)
         print(f"📄 PDF 생성 완료: {output_pdf_path}")
     except Exception as e:
         print(f"❌ PDF 생성 실패: {e}")
 
 
 def handle_popup(page):
-    """접속 시 뜨는 일반 모달/팝업 닫기"""
+    """일반 팝업/모달 닫기"""
     try:
         page.keyboard.press("Escape")
         time.sleep(0.5)
@@ -123,12 +117,11 @@ def handle_popup(page):
 def close_app_install_popup(page):
     """
     모바일 하단 App 설치 팝업(AppInstallPopup_*)을 강제로 닫는다.
-    1) 닫기(X) 버튼 클릭
-    2) '오늘은 그냥 볼게요.' 버튼 클릭
-    3) 최후 수단: wrapper display:none
+    1) 닫기(X) 버튼
+    2) '오늘은 그냥 볼게요.' 버튼
+    3) wrapper 자체 display:none
     """
     try:
-        # 1) 상단 X 버튼
         close_now = page.locator(
             "div.AppInstallPopup_modal_wrapper__VLXRm "
             "button.AppInstallPopup_modal_contents__closeButton__1nsi_[aria-label='닫기']"
@@ -141,7 +134,6 @@ def close_app_install_popup(page):
         print(f"⚠️ AppInstallPopup closeNow 클릭 실패: {e}")
 
     try:
-        # 2) '오늘은 그냥 볼게요.' 버튼
         close_today = page.locator(
             "div.AppInstallPopup_modal_wrapper__VLXRm "
             "button.AppInstallPopup_content_body__closeTodayButton__1hlxe"
@@ -154,7 +146,6 @@ def close_app_install_popup(page):
         print(f"⚠️ AppInstallPopup closeToday 클릭 실패: {e}")
 
     try:
-        # 3) 최후: wrapper 자체를 display:none
         page.evaluate("""
         () => {
           const el = document.querySelector('.AppInstallPopup_modal_wrapper__VLXRm');
@@ -167,9 +158,7 @@ def close_app_install_popup(page):
 
 
 def hide_small_fixed_banners(page):
-    """
-    App 화면 하단에 떠 있는 '앱 설치 유도' 등 fixed 배너들 제거 (백업용).
-    """
+    """모바일 화면 하단 플로팅 배너 제거 (백업용)"""
     js = """
     () => {
       const vw = window.innerWidth;
@@ -183,7 +172,6 @@ def hide_small_fixed_banners(page):
           const isNarrow = rect.width < vw * 0.9;
           const isNotFullHeight = rect.height < vh * 0.8;
           const text = (el.innerText || '').trim();
-
           if (isBottom && isNarrow && isNotFullHeight) {
             if (
               text.includes('앱으로') ||
@@ -216,7 +204,7 @@ def get_dynamic_clip_height(page, selector, min_height):
 
 
 # =========================
-#  Lazy 포함 배너 포지션 감지용
+#  캐러셀 관련 (공통)
 # =========================
 def get_leftmost_banner_id(page):
     """
@@ -255,19 +243,32 @@ def get_leftmost_banner_id(page):
     return page.evaluate(js)
 
 
+def swipe_slider_left(page, box):
+    """슬라이더 영역을 마우스 드래그로 오른쪽→왼쪽 스와이프"""
+    if not box:
+        return
+    start_x = box["x"] + box["width"] * 0.8
+    end_x   = box["x"] + box["width"] * 0.2
+    y       = box["y"] + box["height"] * 0.5
+
+    page.mouse.move(start_x, y)
+    page.mouse.down()
+    page.mouse.move(end_x, y, steps=15)
+    page.mouse.up()
+    page.wait_for_timeout(900)
+
+
 def capture_web_banner_area(page, image_path):
     """
-    Web 메인 배너 영역만 캡쳐.
+    Web 메인 배너 영역 캡쳐.
     section 기준으로 시도 후 안 되면 상단 clip fallback.
     """
     try:
         section_locator = page.locator("section[class*='BannerArea_MainBannerArea']")
         if section_locator.count() > 0:
-            container = section_locator.first
-            container.screenshot(path=image_path)
+            section_locator.first.screenshot(path=image_path)
             return
 
-        # fallback: 상단 영역 clip
         clip_h = get_dynamic_clip_height(
             page,
             "ul[class*='BannerArea_MainBannerArea__slider']",
@@ -282,6 +283,9 @@ def capture_web_banner_area(page, image_path):
         page.screenshot(path=image_path, full_page=True)
 
 
+# =========================
+#  main
+# =========================
 def main():
     client = WebClient(token=SLACK_TOKEN)
 
@@ -289,9 +293,9 @@ def main():
         print("🚀 브라우저 실행 (고화질 모드)...")
         browser = p.chromium.launch(headless=True)
 
-        # ------------------------------------------------------------------
-        # [Step 1] Web 캡쳐 (PC, 1920px) - lazy 포함 순차 주행
-        # ------------------------------------------------------------------
+        # --------------------------------------------------------------
+        # [Step 1] Web (PC) – 슬라이더 드래그로 모든 배너 캡쳐
+        # --------------------------------------------------------------
         context_web = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -299,7 +303,7 @@ def main():
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
             viewport={"width": WEB_VIEWPORT_W, "height": WEB_RENDER_HEIGHT},
-            device_scale_factor=2.5  # 선명도 + 용량 균형
+            device_scale_factor=2.5
         )
         page_web = context_web.new_page()
 
@@ -308,7 +312,7 @@ def main():
         time.sleep(3)
         handle_popup(page_web)
 
-        # 메인 슬라이드 로딩 대기
+        # 슬라이드 로딩 대기
         try:
             page_web.wait_for_selector(
                 "li[class*='BannerArea_MainBannerArea__slider__slide']",
@@ -324,72 +328,50 @@ def main():
         total_dom_slides = slides.count()
         print(f"📊 총 {total_dom_slides}개의 슬라이드 DOM 발견 (Web)")
 
-        # next 버튼 (있으면 사용, 없으면 첫 화면만 캡쳐)
-        section_locator = page_web.locator("section[class*='BannerArea_MainBannerArea']")
-        if section_locator.count() > 0:
-            next_btn_locator = section_locator.locator('button[aria-label="다음"]')
-        else:
-            next_btn_locator = page_web.locator('button[aria-label="다음"]')
+        # 슬라이더 박스 (드래그 기준)
+        slider_ul = page_web.locator("ul[class*='BannerArea_MainBannerArea__slider']").first
+        slider_box = slider_ul.bounding_box() if slider_ul else None
 
         captured_infos = []
+        captured_ids = set()
 
-        if next_btn_locator.count() == 0:
-            print("⚠️ '다음' 버튼을 찾지 못했습니다. 첫 화면만 캡쳐하고 종료합니다.")
-            banner_id = get_leftmost_banner_id(page_web)
-            if banner_id:
-                web_filename = "web_0.jpg"
+        max_steps = max(total_dom_slides * 2, 20)  # 안전 여유
+
+        for step in range(max_steps):
+            current_id = get_leftmost_banner_id(page_web)
+            print(f"[DEBUG] step {step}, 현재 왼쪽 배너 ID = {current_id}")
+
+            if current_id and current_id not in captured_ids:
+                idx = len(captured_infos)
+                web_filename = f"web_{idx}.jpg"
                 capture_web_banner_area(page_web, web_filename)
                 resize_image_high_quality(web_filename, WEB_TARGET_WIDTH)
-                captured_infos.append({"id": banner_id, "web_filename": web_filename})
-        else:
-            next_btn = next_btn_locator.first
-            captured_ids = set()
-            step = 0
-            max_steps = 50
 
-            while True:
-                current_id = get_leftmost_banner_id(page_web)
-                print(f"[DEBUG] step {step}, 현재 왼쪽 배너 ID = {current_id}")
+                captured_infos.append({"id": current_id, "web_filename": web_filename})
+                captured_ids.add(current_id)
+                print(f"   ✅ Web 캡쳐 완료: {web_filename} (banner_id={current_id})")
 
-                if current_id and current_id not in captured_ids:
-                    idx = len(captured_infos)
-                    web_filename = f"web_{idx}.jpg"
-                    capture_web_banner_area(page_web, web_filename)
-                    resize_image_high_quality(web_filename, WEB_TARGET_WIDTH)
-
-                    captured_infos.append({"id": current_id, "web_filename": web_filename})
-                    captured_ids.add(current_id)
-                    print(f"   ✅ Web 캡쳐 완료: {web_filename} (banner_id={current_id})")
-
-                step += 1
-                if step >= max_steps:
-                    print("[WARN] max_steps에 도달하여 Web 순회를 종료합니다.")
+            # 이미 한 번 본 첫 ID로 다시 돌아오면 한 바퀴 돈 것으로 보고 종료
+            if step > 0 and current_id and len(captured_ids) > 0:
+                first_id = captured_infos[0]["id"]
+                if current_id == first_id:
+                    print("[INFO] 처음 배너로 다시 돌아와 Web 순회를 종료합니다.")
                     break
 
-                try:
-                    if not next_btn.is_visible():
-                        print("[INFO] '다음' 버튼이 더 이상 보이지 않아 순회를 종료합니다.")
-                        break
-                    if next_btn.is_disabled():
-                        print("[INFO] '다음' 버튼이 disabled 상태입니다. 마지막 슬라이드로 판단하고 종료합니다.")
-                        break
-                    next_btn.click()
-                    page_web.wait_for_timeout(900)
-                except Exception as e:
-                    print(f"[ERROR] next 버튼 클릭 실패: {e}")
-                    break
+            # 슬라이더 드래그 (다음 배너로 이동 시도)
+            swipe_slider_left(page_web, slider_box)
 
         print(f"📊 최종 캡쳐된 Web 배너 수: {len(captured_infos)}")
-        print("   IDs:", [c['id'] for c in captured_infos])
+        print("   IDs:", [c["id"] for c in captured_infos])
 
         if not captured_infos:
             print("❌ 캡쳐된 배너가 없어 App/PDF 단계는 건너뜁니다.")
             browser.close()
             return
 
-        # ------------------------------------------------------------------
-        # [Step 2] App 캡쳐 (Mobile) - 한 화면 기준 + 모달 완전 제거
-        # ------------------------------------------------------------------
+        # --------------------------------------------------------------
+        # [Step 2] App (Mobile) – 모달 닫고, 각 배너 위치 맞춰 캡쳐
+        # --------------------------------------------------------------
         context_app = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
@@ -402,26 +384,54 @@ def main():
         )
         page_app = context_app.new_page()
 
-        print(f"\n🌐 [App] 접속 중...")
+        print("\n🌐 [App] 접속 중...")
         page_app.goto(TARGET_URL)
         time.sleep(2)
         handle_popup(page_app)
-        close_app_install_popup(page_app)   # 앱 설치 모달 명시적으로 닫기
-        hide_small_fixed_banners(page_app)  # 혹시 남은 플로팅 배너 있으면 제거
+        close_app_install_popup(page_app)
+        hide_small_fixed_banners(page_app)
 
-        # 여기서는 "브라우저에서 한 화면" 기준으로 그대로 캡쳐
-        # (추가 스크롤/클리핑 없이 뷰포트 전체)
+        # App 슬라이더 박스
+        try:
+            page_app.wait_for_selector(
+                "li[class*='BannerArea_MainBannerArea__slider__slide']",
+                state="visible",
+                timeout=15000
+            )
+        except Exception:
+            print("❌ App 메인 배너 로딩 실패 (그래도 Web만 PDF 생성 가능)")
+        slider_ul_app = page_app.locator("ul[class*='BannerArea_MainBannerArea__slider']").first
+        slider_box_app = slider_ul_app.bounding_box() if slider_ul_app else None
+
         for idx, info in enumerate(captured_infos):
             banner_id = info["id"]
             web_filename = info["web_filename"]
 
-            print(f"\n📸 [App] {idx+1}/{len(captured_infos)} - {banner_id} 캡쳐 중...")
+            print(f"\n📸 [App] {idx+1}/{len(captured_infos)} - {banner_id} 위치 맞추는 중...")
+
+            app_filename = f"app_{idx}.jpg"
 
             try:
-                app_filename = f"app_{idx}.jpg"
-                # viewport 그대로 한 화면 캡쳐
-                page_app.screenshot(path=app_filename, full_page=False)
+                # 먼저 슬라이더를 여러 번 스와이프하면서 해당 ID가 왼쪽에 올 때까지 시도
+                seen_ids_app = set()
+                for step in range(max_steps):
+                    current_app_id = get_leftmost_banner_id(page_app)
+                    print(f"   [APP-DEBUG] step {step}, 현재 왼쪽 배너 ID = {current_app_id}")
 
+                    if current_app_id == banner_id:
+                        break
+
+                    if current_app_id in seen_ids_app:
+                        # 다시 본 ID면 한 바퀴 돈 거라 보고 포기
+                        print("   [APP-INFO] 한 바퀴 돈 것으로 판단, 더 이상 이동하지 않음")
+                        break
+                    if current_app_id:
+                        seen_ids_app.add(current_app_id)
+
+                    swipe_slider_left(page_app, slider_box_app)
+
+                # 이제 현재 화면(뷰포트 전체)을 캡쳐 (네가 올린 iOS 스샷 느낌)
+                page_app.screenshot(path=app_filename, full_page=False)
                 resize_image_high_quality(app_filename, APP_TARGET_WIDTH)
                 print(f"   ✅ App 캡쳐 완료: {app_filename}")
 
@@ -435,7 +445,7 @@ def main():
                         title=pdf_filename,
                         initial_comment=f"📢 [{idx+1}/{len(captured_infos)}] {banner_id} 게재 보고"
                     )
-                    print(f"   🚀 슬랙 전송 완료")
+                    print("   🚀 슬랙 전송 완료")
 
                 for f in (web_filename, app_filename, pdf_filename):
                     if os.path.exists(f):
